@@ -1,0 +1,103 @@
+#################################################################################
+# .gdbinit-FreeRTOS-helpers
+#
+# Created on: 29.03.2013
+#     Author: Artem Pisarenko
+#
+# Modified on: 04.03.2020
+#     Author: Andrew Gatt
+#
+# Helper script providing support for FreeRTOS-aware debugging
+# Features:
+# - showing tasks (handle, name, stack size and stack space);
+# - requires INCLUDE_uxTaskGetStackHighWaterMark = 1 and configRECORD_STACK_HIGH_ADDRESS = 1 to function
+# - set $port_stack_growth depending on architecture
+#
+# To use, drop file into workspace, using DEBUG CONSOLE
+# > source .gdbinit-FreeRTOS
+# > freertos_show_threads
+#################################################################################
+
+# Command "freertos_show_threads"
+# Shows tasks table: handle(xTaskHandle) and name
+define freertos_show_threads
+	set $thread_list_size = 0
+	set $thread_list_size = uxCurrentNumberOfTasks
+	if ($thread_list_size == 0)
+		echo FreeRTOS missing or scheduler isn't started\n
+	else
+		set $current_thread = pxCurrentTCB
+		set $tasks_found = 0
+		set $idx = 0
+
+		set $task_list = pxReadyTasksLists
+		set $task_list_size = sizeof(pxReadyTasksLists)/sizeof(pxReadyTasksLists[0])
+
+		printf "TCB*          Name                Stack Size  Stack Used  Stack Free  Status\n"
+
+		while ($idx < $task_list_size)
+			_freertos_show_thread_item $task_list[$idx] "ready"
+			set $idx = $idx + 1
+		end
+
+		_freertos_show_thread_item xDelayedTaskList1 "blocked"
+		_freertos_show_thread_item xDelayedTaskList2 "blocked"
+		_freertos_show_thread_item xPendingReadyList "pending"
+		
+		if (INCLUDE_vTaskSuspend == 1)
+			_freertos_show_thread_item xSuspendedTaskList "suspended"
+		end
+		if (INCLUDE_vTaskDelete == 1)
+			_freertos_show_thread_item xTasksWaitingTermination "terminated"
+		end
+	end
+end
+
+#######################
+# Internal functions
+define _freertos_show_thread_item
+	set $port_stack_growth = -1
+	set $watermark_byte = (uint8_t)0xA5
+	
+	set $list_thread_count = $arg0.uxNumberOfItems
+	set $prev_list_elem_ptr = -1
+	set $list_elem_ptr = $arg0.xListEnd.pxPrevious
+	
+	while (($list_thread_count > 0) && ($list_elem_ptr != 0) && ($list_elem_ptr != $prev_list_elem_ptr) && ($tasks_found < $thread_list_size))
+		set $threadid = $list_elem_ptr->pvOwner
+		set $task_tcb = ((tskTCB *)$threadid)
+		set $thread_name_str = $task_tcb->pcTaskName
+		set $tasks_found = $tasks_found + 1
+		set $list_thread_count = $list_thread_count - 1
+		set $prev_list_elem_ptr = $list_elem_ptr
+		set $list_elem_ptr = $prev_list_elem_ptr->pxPrevious
+		
+		if ($port_stack_growth < 0)
+			# operators on pointers give number of elements, multiple by size to get bytes
+			set $stack_size = ($task_tcb->pxEndOfStack - $task_tcb->pxStack) * sizeof(StackType_t)
+			set $stack_end = (uint8_t*)$task_tcb->pxStack
+		else
+			set $stack_size = ($task_tcb->pxStack - $task_tcb->pxEndOfStack) * sizeof(StackType_t)
+			set $stack_end = (uint8_t*)$task_tcb->pxEndOfStack
+		end
+
+		set $stack_space = 0
+		set $stack_end_byte = *$stack_end
+
+		while ($stack_end_byte == $watermark_byte)
+			set $stack_end = $stack_end - $port_stack_growth
+			set $stack_end_byte = *$stack_end
+			set $stack_space = $stack_space + 1
+		end
+		
+		set $stack_used = $stack_size - $stack_space
+		set $status = (char*)$arg1
+
+		if ($threadid == $current_thread)
+			set $status = (char*)"running"
+		end
+		
+		printf "0x%-12x%-20s%-12ld%-12ld%-12ld%-12s", $threadid, $thread_name_str, $stack_size, $stack_used, $stack_space, $status
+	end
+end
+
